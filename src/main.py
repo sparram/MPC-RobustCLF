@@ -18,15 +18,15 @@ def ejecutar_simulacion():
     if engine_initialized():
         close_engine()
 
-    num_escenarios = 10 # Puedes probar solo 2 o 3 escenarios para que sea rápido
+    num_escenarios = 1 # Puedes probar solo 2 o 3 escenarios para que sea rápido
     start_seed = 37
-    VIDEO_SKIP = 10  # Guardar 1 frame cada 5 pasos para acelerar la grabación
+    VIDEO_SKIP = 1  # Guardar 1 frame cada 5 pasos para acelerar la grabación
 
     env = MetaDriveEnv(dict(
         use_render=False,
         num_scenarios=num_escenarios,
         start_seed=start_seed,
-        traffic_density=0.0,
+        traffic_density=0.2,
         map="OCCO",
         crash_object_done=False,
         out_of_road_done=False
@@ -69,7 +69,17 @@ def ejecutar_simulacion():
                         ref_x, ref_y = lane.position(target_s, 0)
                         ref_trajectory.append((ref_x, ref_y, target_speed))
 
-                    u_nom_seq, u0_warm_flat = mpc.solve(u0_warm, state_real, ref_trajectory)
+                    obstacle_pos = None
+                    vehicles = env.engine.traffic_manager.vehicles
+                    for v in vehicles:
+                        if v != vehicle:  # Si no es el ego-vehicle
+                            # Distancia al vehículo detectado
+                            dist = np.linalg.norm(vehicle.position - v.position)
+                            if dist < 20.0:  # Si está a menos de 20 metros
+                                obstacle_pos = np.array([v.position[0], v.position[1]])
+                                break
+                    
+                    u_nom_seq, u0_warm_flat = mpc.solve(u0_warm, state_real, ref_trajectory, obstacle_pos=obstacle_pos)
                     u_nom_first = u_nom_seq[0]
 
                     u0_warm = np.roll(u0_warm_flat, -2)
@@ -79,21 +89,21 @@ def ejecutar_simulacion():
                 pasos_completados += 1
 
                 # === CAPTURA DE VIDEO (Muestra poquitos frames) ===
-                # if step % VIDEO_SKIP == 0:
-                #     frame = env.render(
-                #         mode="topdown",
-                #         window=False,
-                #         screen_size=(600, 600),
-                #         camera_position=vehicle.position,
-                #         target_vehicle_heading_up=True,
-                #         scaling=5,
-                #         text={
-                #             "seed": seed,
-                #             "step": step,
-                #             "speed_kmh": round(state_real[2] * 3.6, 1)
-                #         }
-                #     )
-                #     writer.append_data(frame)
+                if step % VIDEO_SKIP == 0:
+                    frame = env.render(
+                        mode="topdown",
+                        window=False,
+                        screen_size=(600, 600),
+                        camera_position=vehicle.position,
+                        target_vehicle_heading_up=True,
+                        scaling=5,
+                        text={
+                            "seed": seed,
+                            "step": step,
+                            "speed_kmh": round(state_real[2] * 3.6, 1)
+                        }
+                    )
+                    writer.append_data(frame)
 
                 # Verificación de tolerancia y finalización
                 ancho_carril = lane.width
