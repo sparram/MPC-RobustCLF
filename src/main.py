@@ -20,7 +20,7 @@ def ejecutar_simulacion():
 
     num_escenarios = 1 # Puedes probar solo 2 o 3 escenarios para que sea rápido
     start_seed = 37
-    VIDEO_SKIP = 1  # Guardar 1 frame cada 5 pasos para acelerar la grabación
+    VIDEO_SKIP = 5  # Guardar 1 frame cada 5 pasos para acelerar la grabación
 
     env = MetaDriveEnv(dict(
         use_render=False,
@@ -69,21 +69,43 @@ def ejecutar_simulacion():
                         ref_x, ref_y = lane.position(target_s, 0)
                         ref_trajectory.append((ref_x, ref_y, target_speed))
 
+                    # Orientación del ego-vehicle (vector unitario)
+                    heading_vec = np.array([np.cos(state_real[3]), np.sin(state_real[3])])
+                    
                     obstacle_pos = None
                     vehicles = env.engine.traffic_manager.vehicles
-                    for v in vehicles:
-                        if v != vehicle:  # Si no es el ego-vehicle
-                            # Distancia al vehículo detectado
-                            dist = np.linalg.norm(vehicle.position - v.position)
-                            if dist < 20.0:  # Si está a menos de 20 metros
-                                obstacle_pos = np.array([v.position[0], v.position[1]])
-                                break
                     
-                    u_nom_seq, u0_warm_flat = mpc.solve(u0_warm, state_real, ref_trajectory, obstacle_pos=obstacle_pos)
-                    u_nom_first = u_nom_seq[0]
-
-                    u0_warm = np.roll(u0_warm_flat, -2)
-                    u0_warm[-2:] = u0_warm[-4:-2]
+                    # Detectar obstáculo más cercano al frente
+                    min_dist = 25.0
+                    
+                    for v in vehicles:
+                        if v != vehicle:
+                            rel_pos = v.position - vehicle.position
+                            dist_adelante = np.dot(rel_pos, heading_vec)
+                            dist_total = np.linalg.norm(rel_pos)
+                            
+                            if 0 < dist_adelante < min_dist and dist_total < min_dist:
+                                min_dist = dist_adelante
+                                obstacle_pos = np.array([v.position[0], v.position[1]])
+                    
+                    # Evaluación del freno de emergencia proactivo
+                    freno_emergencia = False
+                    if obstacle_pos is not None:
+                        dist_obs = np.linalg.norm(state_real[:2] - obstacle_pos)
+                        v_curr = max(state_real[2], 0.0)
+                        dist_critica = 5.0 + 0.8 * v_curr  # Distancia de seguridad dinámica
+                    
+                        if dist_obs < dist_critica:
+                            freno_emergencia = True
+                    
+                    if freno_emergencia:
+                        u_nom_first = np.array([0.0, -1.0])  # Volante recto, freno máximo
+                    else:
+                        u_nom_seq, u0_warm_flat = mpc.solve(u0_warm, state_real, ref_trajectory, obstacle_pos=obstacle_pos)
+                        u_nom_first = u_nom_seq[0]
+                    
+                        u0_warm = np.roll(u0_warm_flat, -2)
+                        u0_warm[-2:] = u0_warm[-4:-2]
 
                 obs, reward, terminated, truncated, info = env.step(u_nom_first)
                 pasos_completados += 1

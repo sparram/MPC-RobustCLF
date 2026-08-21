@@ -22,7 +22,7 @@ class NominalMPC:
 
         return x_bar, A_seq, B_seq
 
-    def _cbf_constraint_multistep(self, u_flat, current_state, obstacle_pos, gamma=0.2):
+    def _cbf_constraint_multistep(self, u_flat, current_state, obstacle_pos, gamma=0.4):
         """
         Aplica la condicion CBF h(x_{k+1}) - (1 - gamma)*h(x_k) >= 0 
         a lo largo de todo el horizonte N.
