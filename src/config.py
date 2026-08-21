@@ -12,7 +12,7 @@ W_BOUND_POS = 0.9      # Cota de incertidumbre R-CBF
 DETECTION_RADIUS = 25.0
 MPC_SKIP_STEPS = 1
 
-TOLERANCIA_MAX_M = 5.5  # 1.75m (medio carril) + 0.50m de tolerancia extra
+TOLERANCIA_MAX_M = 2.25  # 1.75m (medio carril) + 0.50m de tolerancia extra
 
 TOTAL_STEPS = 2000
 FPS = 15

@@ -9,7 +9,7 @@ os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["CVXPY_ACTIVE_SOLVER"] = "CLARABEL"
 
 from config import N, DT, TOTAL_STEPS, FPS, MPC_SKIP_STEPS, TOLERANCIA_MAX_M, VIDEO_FILENAME
-from controllers.nominal_mpc import NominalMPC  # O tu controlador FastLTVMPC
+from controllers.nominal_mpc import NominalMPC
 from metadrive.envs.metadrive_env import MetaDriveEnv
 from metadrive.engine.engine_utils import close_engine, engine_initialized
 
@@ -18,9 +18,9 @@ def ejecutar_simulacion():
     if engine_initialized():
         close_engine()
 
-    num_escenarios = 1 # Puedes probar solo 2 o 3 escenarios para que sea rápido
+    num_escenarios = 1
     start_seed = 37
-    VIDEO_SKIP = 5  # Guardar 1 frame cada 5 pasos para acelerar la grabación
+    VIDEO_SKIP = 5
 
     env = MetaDriveEnv(dict(
         use_render=False,
@@ -69,15 +69,12 @@ def ejecutar_simulacion():
                         ref_x, ref_y = lane.position(target_s, 0)
                         ref_trajectory.append((ref_x, ref_y, target_speed))
 
-                    # Orientación del ego-vehicle (vector unitario)
                     heading_vec = np.array([np.cos(state_real[3]), np.sin(state_real[3])])
-                    
                     obstacle_pos = None
                     vehicles = env.engine.traffic_manager.vehicles
-                    
-                    # Detectar obstáculo más cercano al frente
                     min_dist = 25.0
                     
+                    # Detectar obstáculo más cercano al frente
                     for v in vehicles:
                         if v != vehicle:
                             rel_pos = v.position - vehicle.position
@@ -88,29 +85,32 @@ def ejecutar_simulacion():
                                 min_dist = dist_adelante
                                 obstacle_pos = np.array([v.position[0], v.position[1]])
                     
-                    # Evaluación del freno de emergencia proactivo
+                    # Evaluación del freno de emergencia
                     freno_emergencia = False
                     if obstacle_pos is not None:
                         dist_obs = np.linalg.norm(state_real[:2] - obstacle_pos)
                         v_curr = max(state_real[2], 0.0)
-                        dist_critica = 5.0 + 0.8 * v_curr  # Distancia de seguridad dinámica
+                        dist_critica = 5.0 + 0.8 * v_curr
                     
                         if dist_obs < dist_critica:
                             freno_emergencia = True
                     
+                    # Resolver siempre el MPC para obtener el guiñado ideal
+                    u_nom_seq, u0_warm_flat = mpc.solve(u0_warm, state_real, ref_trajectory, obstacle_pos=obstacle_pos)
+
                     if freno_emergencia:
-                        u_nom_first = np.array([0.0, -1.0])  # Volante recto, freno máximo
+                        # Mantener el ángulo de dirección del MPC (u_nom_seq[0, 0]) y aplicar freno máximo (-1.0)
+                        u_nom_first = np.array([u_nom_seq[0, 0], -1.0])
                     else:
-                        u_nom_seq, u0_warm_flat = mpc.solve(u0_warm, state_real, ref_trajectory, obstacle_pos=obstacle_pos)
                         u_nom_first = u_nom_seq[0]
                     
-                        u0_warm = np.roll(u0_warm_flat, -2)
-                        u0_warm[-2:] = u0_warm[-4:-2]
+                    u0_warm = np.roll(u0_warm_flat, -2)
+                    u0_warm[-2:] = u0_warm[-4:-2]
 
                 obs, reward, terminated, truncated, info = env.step(u_nom_first)
                 pasos_completados += 1
 
-                # === CAPTURA DE VIDEO (Muestra poquitos frames) ===
+                # === CAPTURA DE VIDEO ===
                 if step % VIDEO_SKIP == 0:
                     frame = env.render(
                         mode="topdown",
@@ -127,20 +127,16 @@ def ejecutar_simulacion():
                     )
                     writer.append_data(frame)
 
-                # Verificación de tolerancia y finalización
+                # Registro de desviación sin romper el bucle
                 ancho_carril = lane.width
                 limite_borde = ancho_carril / 2.0
 
-                if abs(lat_error) > TOLERANCIA_MAX_M:
-                    exceso_salida = abs(lat_error) - limite_borde
-                    break
+                if abs(lat_error) > limite_borde:
+                    exceso_salida = max(exceso_salida, abs(lat_error) - limite_borde)
 
                 if terminated or truncated:
                     if info.get("arrive_dest", False):
                         exito = True
-                    else:
-                        if abs(lat_error) > limite_borde:
-                            exceso_salida = abs(lat_error) - limite_borde
                     break
 
             resultados.append({
@@ -156,9 +152,7 @@ def ejecutar_simulacion():
         writer.close()
         cv2.destroyAllWindows()
         env.close()
-        #print(f"\n¡Video guardado exitosamente en '{VIDEO_FILENAME}'!")
 
-         # IMPRESIÓN DE LA TABLA FINAL EN CONSOLA
         if resultados:
             print("\n" + "=" * 92)
             print(f"{'SEMILLA':<8} | {'ÉXITO':<6} | {'ERR LAT PROM (m)':<17} | {'ERR LAT MÁX (m)':<16} | {'EXCESO SALIDA (m)':<18} | {'PASOS':<6}")
@@ -171,7 +165,6 @@ def ejecutar_simulacion():
             err_prom_global = np.mean([r['Err. Lat. Promedio (m)'] for r in resultados])
             print(f"Tasa de Éxito Global: {tasa_exito:.1f}%")
             print(f"Error Lateral Promedio Global: {err_prom_global:.3f} m\n")
-
 
 
 if __name__ == "__main__":
