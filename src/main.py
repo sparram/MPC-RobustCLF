@@ -9,30 +9,38 @@ os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["CVXPY_ACTIVE_SOLVER"] = "CLARABEL"
 
 from config import N, DT, TOTAL_STEPS, FPS, MPC_SKIP_STEPS, TOLERANCIA_MAX_M, VIDEO_FILENAME
-from controllers.nominal_mpc import NominalMPC  # O tu controlador FastLTVMPC
 from metadrive.envs.metadrive_env import MetaDriveEnv
 from metadrive.engine.engine_utils import close_engine, engine_initialized
 
+# === SELECTOR DE CONTROLADOR ===
+TIPO_CONTROLADOR = "CLF_CBF_N1"  # Opciones: "NOMINAL_MPC" o "CLF_CBF_N1"
+
+if TIPO_CONTROLADOR == "NOMINAL_MPC":
+    from controllers.nominal_mpc import NominalMPC
+    controller = NominalMPC(horizon=N)
+elif TIPO_CONTROLADOR == "CLF_CBF_N1":
+    from controllers.clf_cbf_qp import CLFCBFQPControllerSciPy
+    controller = CLFCBFQPControllerSciPy()
+
+VISUALIZAR_2D = True  # Cambia a False cuando quieras correr sin gráficos
 
 def ejecutar_simulacion():
     if engine_initialized():
         close_engine()
 
-    num_escenarios = 10 # Puedes probar solo 2 o 3 escenarios para que sea rápido
+    num_escenarios = 10
     start_seed = 37
-    VIDEO_SKIP = 10  # Guardar 1 frame cada 5 pasos para acelerar la grabación
 
     env = MetaDriveEnv(dict(
         use_render=False,
         num_scenarios=num_escenarios,
         start_seed=start_seed,
         traffic_density=0.0,
-        map="OCCO",
+        map="CCO",
         crash_object_done=False,
         out_of_road_done=False
     ))
 
-    mpc = NominalMPC(horizon=N)
     writer = imageio.get_writer(VIDEO_FILENAME, fps=FPS)
     resultados = []
 
@@ -55,45 +63,51 @@ def ejecutar_simulacion():
                     vehicle.speed_km_h / 3.6,
                     vehicle.heading_theta
                 ])
-
+                
                 lane = vehicle.navigation.current_lane
                 current_s, lat_error = lane.local_coordinates((state_real[0], state_real[1]))
                 errores_laterales.append(abs(lat_error))
-
-                # Planificación MPC
-                if step % MPC_SKIP_STEPS == 0:
-                    ref_trajectory = []
-                    target_speed = 8.0
-                    for i in range(N):
-                        target_s = current_s + target_speed * (i + 1) * DT
-                        ref_x, ref_y = lane.position(target_s, 0)
-                        ref_trajectory.append((ref_x, ref_y, target_speed))
-
-                    u_nom_seq, u0_warm_flat = mpc.solve(u0_warm, state_real, ref_trajectory)
-                    u_nom_first = u_nom_seq[0]
-
-                    u0_warm = np.roll(u0_warm_flat, -2)
-                    u0_warm[-2:] = u0_warm[-4:-2]
-
+                
+                # === PLANIFICACIÓN / CONTROL ===
+                if TIPO_CONTROLADOR == "NOMINAL_MPC":
+                    if step % MPC_SKIP_STEPS == 0:
+                        ref_trajectory = []
+                        target_speed = 8.0
+                        for i in range(N):
+                            target_s = current_s + target_speed * (i + 1) * DT
+                            ref_x, ref_y = lane.position(target_s, 0)
+                            ref_trajectory.append((ref_x, ref_y, target_speed))
+                            
+                        u_nom_seq, u0_warm_flat = controller.solve(u0_warm, state_real, ref_trajectory)
+                        u_nom_first = u_nom_seq[0]
+                        
+                        u0_warm = np.roll(u0_warm_flat, -2)
+                        u0_warm[-2:] = u0_warm[-4:-2]
+                
+                elif TIPO_CONTROLADOR == "CLF_CBF_N1":
+                    # Llama al controlador QP resolviendo el problema instantáneo (N=1)
+                    u_nom_first = controller.solve(
+                        state_real=state_real,
+                        current_s=current_s,
+                        lat_error=lat_error,
+                        lane=lane,
+                        target_speed=8.0,
+                        vehicle=vehicle  # Pasamos la instancia del vehículo
+                    )
+                
+                # Avanzar la simulación con la acción obtenida [u_steer, u_acc]
                 obs, reward, terminated, truncated, info = env.step(u_nom_first)
                 pasos_completados += 1
-
-                # === CAPTURA DE VIDEO (Muestra poquitos frames) ===
-                # if step % VIDEO_SKIP == 0:
-                #     frame = env.render(
-                #         mode="topdown",
-                #         window=False,
-                #         screen_size=(600, 600),
-                #         camera_position=vehicle.position,
-                #         target_vehicle_heading_up=True,
-                #         scaling=5,
-                #         text={
-                #             "seed": seed,
-                #             "step": step,
-                #             "speed_kmh": round(state_real[2] * 3.6, 1)
-                #         }
-                #     )
-                #     writer.append_data(frame)
+                # Renderizado 2D super liviano en tiempo real
+                if VISUALIZAR_2D and pasos_completados % 3 == 0:
+                    env.render(
+                        mode="topdown",
+                        window=True,  # Abre la ventana Pygame en pantalla
+                        screen_size=(800, 800),
+                        camera_position=vehicle.position,
+                        target_vehicle_heading_up=True
+                    )
+                    
 
                 # Verificación de tolerancia y finalización
                 ancho_carril = lane.width
@@ -124,9 +138,8 @@ def ejecutar_simulacion():
         writer.close()
         cv2.destroyAllWindows()
         env.close()
-        #print(f"\n¡Video guardado exitosamente en '{VIDEO_FILENAME}'!")
 
-         # IMPRESIÓN DE LA TABLA FINAL EN CONSOLA
+        # IMPRESIÓN DE LA TABLA FINAL EN CONSOLA
         if resultados:
             print("\n" + "=" * 92)
             print(f"{'SEMILLA':<8} | {'ÉXITO':<6} | {'ERR LAT PROM (m)':<17} | {'ERR LAT MÁX (m)':<16} | {'EXCESO SALIDA (m)':<18} | {'PASOS':<6}")
@@ -139,7 +152,6 @@ def ejecutar_simulacion():
             err_prom_global = np.mean([r['Err. Lat. Promedio (m)'] for r in resultados])
             print(f"Tasa de Éxito Global: {tasa_exito:.1f}%")
             print(f"Error Lateral Promedio Global: {err_prom_global:.3f} m\n")
-
 
 
 if __name__ == "__main__":
